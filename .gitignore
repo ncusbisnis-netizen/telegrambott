@@ -1,6 +1,6 @@
 node_modules/
-database.json
-cooldown.json
-.env
-.DS_Store
+auth/
+groups.txt
 npm-debug.log
+.DS_Store
+.env
