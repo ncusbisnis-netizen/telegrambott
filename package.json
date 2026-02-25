@@ -1,16 +1,15 @@
 {
-  "name": "telegram-mlbb-bot",
+  "name": "wa-bot-get-id",
   "version": "1.0.0",
-  "description": "Telegram Bot untuk cek info MLBB",
+  "description": "Bot untuk mengambil ID grup WhatsApp",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "axios": "^1.6.0",
+    "@whiskeysockets/baileys": "^6.7.0",
     "express": "^4.18.2",
-    "node-telegram-bot-api": "^0.64.0",
-    "fs-extra": "^11.1.1"
+    "qrcode-terminal": "^0.12.0"
   },
   "engines": {
     "node": "18.x"
