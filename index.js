@@ -5,25 +5,35 @@ if (!globalThis.crypto) {
 }
 
 const { makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
+const { HttpsProxyAgent } = require('https-proxy-agent');
 const express = require('express');
 const fs = require('fs');
-const path = require('path');
-const QRCode = require('qrcode');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ========== KONFIGURASI ==========
-const NOMOR_BOT = '6283133199990'; // GANTI DENGAN NOMOR BOT ANDA
-const ADMIN_NOMOR = '6283133199991@s.whatsapp.net'; // GANTI DENGAN NOMOR ADMIN
+const NOMOR_BOT = '6283133199990';
+const ADMIN_NOMOR = '6283133199991@s.whatsapp.net';
 // =================================
+
+// Daftar proxy gratis (update dari https://free-proxy-list.net/)
+const PROXY_LIST = [
+    'http://51.158.68.133:8811',
+    'http://51.158.123.35:9999',
+    'http://51.158.172.165:8811',
+    'http://139.162.78.109:3128',
+    'http://165.22.73.197:3128',
+    'http://165.22.73.197:3128',
+    'http://167.99.172.167:3128'
+];
 
 let pairingCode = null;
 let isConnected = false;
 let groupsDetected = [];
+let currentProxyIndex = 0;
 
 app.use(express.json());
-app.use(express.static('public'));
 
 if (!fs.existsSync('./auth')) {
     fs.mkdirSync('./auth');
@@ -44,10 +54,12 @@ app.get('/', (req, res) => {
             .status { padding: 10px; border-radius: 5px; }
             .connected { background: #d4edda; color: #155724; }
             .disconnected { background: #f8d7da; color: #721c24; }
-            .btn { background: #128C7E; color: white; border: none; padding: 15px; border-radius: 10px; width: 100%; font-size: 16px; cursor: pointer; }
+            .btn { background: #128C7E; color: white; border: none; padding: 15px; border-radius: 10px; width: 100%; font-size: 16px; cursor: pointer; margin: 5px 0; }
             .btn:hover { background: #075e54; }
+            .btn-secondary { background: #6c757d; }
             .code { background: #f0f0f0; padding: 20px; text-align: center; font-size: 32px; letter-spacing: 5px; margin: 20px 0; border-radius: 10px; }
             .group-item { background: #e8f5e9; padding: 15px; margin: 10px 0; border-radius: 5px; word-break: break-all; }
+            .proxy-info { font-size: 12px; color: #666; margin-top: 10px; text-align: center; }
         </style>
     </head>
     <body>
@@ -56,9 +68,11 @@ app.get('/', (req, res) => {
             <div class="info">
                 <p><strong>Nomor Bot:</strong> ${NOMOR_BOT}</p>
                 <p><strong>Status:</strong> <span id="status">${isConnected ? 'Terhubung' : 'Terputus'}</span></p>
+                <p><strong>Proxy:</strong> <span id="proxyStatus">Aktif</span></p>
             </div>
             
             <button class="btn" onclick="getPairing()">🔐 Dapatkan Kode Pairing</button>
+            <button class="btn btn-secondary" onclick="gantiProxy()">🔄 Ganti Proxy</button>
             
             <div id="codeArea" style="display:none; margin-top:20px;">
                 <div class="code" id="pairingCode"></div>
@@ -69,6 +83,8 @@ app.get('/', (req, res) => {
                 <h3>📱 Grup Terdeteksi</h3>
                 <div id="groupList"></div>
             </div>
+            
+            <div class="proxy-info" id="proxyInfo"></div>
         </div>
         
         <script>
@@ -83,11 +99,19 @@ app.get('/', (req, res) => {
                 }
             }
             
+            async function gantiProxy() {
+                const res = await fetch('/api/ganti-proxy', { method: 'POST' });
+                const data = await res.json();
+                alert(data.message);
+                location.reload();
+            }
+            
             async function checkStatus() {
                 const res = await fetch('/api/status');
                 const data = await res.json();
                 
                 document.getElementById('status').innerText = data.connected ? 'Terhubung' : 'Terputus';
+                document.getElementById('proxyInfo').innerText = 'Proxy: ' + data.proxy;
                 
                 if (data.connected) {
                     document.getElementById('codeArea').style.display = 'none';
@@ -112,17 +136,19 @@ app.get('/', (req, res) => {
 });
 
 app.get('/api/pairing', (req, res) => {
-    if (pairingCode) {
-        res.json({ code: pairingCode });
-    } else {
-        res.json({ error: 'Kode belum tersedia' });
-    }
+    res.json({ code: pairingCode });
+});
+
+app.post('/api/ganti-proxy', (req, res) => {
+    currentProxyIndex++;
+    res.json({ message: 'Mengganti proxy...' });
 });
 
 app.get('/api/status', (req, res) => {
     res.json({ 
         connected: isConnected,
-        groups: groupsDetected
+        groups: groupsDetected,
+        proxy: PROXY_LIST[currentProxyIndex % PROXY_LIST.length]
     });
 });
 
@@ -131,6 +157,13 @@ app.listen(PORT, () => {
     startBot();
 });
 
+// Fungsi mendapatkan proxy
+function getProxyAgent() {
+    const proxyUrl = PROXY_LIST[currentProxyIndex % PROXY_LIST.length];
+    console.log('🔌 Menggunakan proxy:', proxyUrl);
+    return new HttpsProxyAgent(proxyUrl);
+}
+
 async function startBot() {
     try {
         console.log('🤖 Memulai bot...');
@@ -138,39 +171,49 @@ async function startBot() {
         
         const { state, saveCreds } = await useMultiFileAuthState('./auth');
         
+        // Buat agent proxy
+        const agent = getProxyAgent();
+        
         const sock = makeWASocket({
             auth: state,
             browser: ['Get Group ID', 'Chrome', '1.0.0'],
             syncFullHistory: false,
-            connectTimeoutMs: 60000
+            connectTimeoutMs: 60000,
+            agent: agent, // PAKAI PROXY
+            version: [2, 3000, 1015901308]
         });
 
         sock.ev.on('creds.update', saveCreds);
 
-        if (!state.creds?.registered) {
-            setTimeout(async () => {
-                try {
-                    const code = await sock.requestPairingCode(NOMOR_BOT);
-                    pairingCode = code;
-                    console.log('✅ Kode pairing:', code);
-                } catch (err) {
-                    console.log('❌ Gagal minta kode:', err.message);
-                }
-            }, 2000);
-        }
+        // Minta kode pairing
+        setTimeout(async () => {
+            try {
+                console.log('📱 Meminta kode pairing...');
+                const code = await sock.requestPairingCode(NOMOR_BOT);
+                pairingCode = code;
+                console.log('✅ Kode pairing:', code);
+            } catch (err) {
+                console.log('❌ Gagal minta kode:', err.message);
+            }
+        }, 3000);
 
         sock.ev.on('connection.update', (update) => {
-            const { connection } = update;
+            const { connection, lastDisconnect } = update;
             
             if (connection === 'open') {
                 isConnected = true;
-                console.log('✅ BOT TERHUBUNG!');
+                console.log('✅✅ BOT TERHUBUNG! ✅✅');
             }
             
             if (connection === 'close') {
                 isConnected = false;
-                console.log('❌ Koneksi terputus, reconnect...');
-                setTimeout(startBot, 5000);
+                const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+                
+                if (shouldReconnect) {
+                    console.log('🔄 Koneksi terputus, ganti proxy dan reconnect...');
+                    currentProxyIndex++; // Ganti proxy
+                    setTimeout(startBot, 3000);
+                }
             }
         });
 
@@ -197,6 +240,6 @@ async function startBot() {
 
     } catch (err) {
         console.log('❌ Error:', err.message);
-        setTimeout(startBot, 10000);
+        setTimeout(startBot, 5000);
     }
 }
