@@ -5,24 +5,36 @@ if (!globalThis.crypto) {
 }
 
 const { makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
+const { HttpsProxyAgent } = require('https-proxy-agent');
+const { SocksProxyAgent } = require('socks-proxy-agent');
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
-const qrcode = require('qrcode');
+const { randomBytes } = require('crypto');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ========== KONFIGURASI ==========
-const NOMOR_BOT = '6283133199990'; // 083133199990 dalam format internasional
-const ADMIN_NOMOR = '6283133199991@s.whatsapp.net'; // nomor admin untuk kirim ID grup
+const NOMOR_BOT = '6283133199990'; // 083133199990
+const ADMIN_NOMOR = '6283133199991@s.whatsapp.net';
 // =================================
+
+// Daftar proxy publik (free proxy list - bisa diganti)
+const PROXY_LIST = [
+    // Format: protocol://host:port
+    // Ini hanya contoh, cari proxy aktif di https://free-proxy-list.net/
+    'http://51.158.68.133:8811',
+    'http://51.158.123.35:9999',
+    'http://51.158.172.165:8811'
+];
 
 // State untuk pairing
 let pairingCode = null;
 let isConnected = false;
 let botSocket = null;
 let groupsDetected = [];
+let currentProxyIndex = 0;
 
 // Middleware
 app.use(express.json());
@@ -33,7 +45,39 @@ if (!fs.existsSync('./auth')) {
     fs.mkdirSync('./auth');
 }
 
-// Route utama - Halaman Web
+// Fungsi untuk mendapatkan agent proxy
+function getProxyAgent() {
+    if (process.env.USE_PROXY === 'false') return undefined;
+    
+    // Coba proxy dari environment variable dulu
+    if (process.env.PROXY_URL) {
+        try {
+            if (process.env.PROXY_URL.startsWith('socks')) {
+                return new SocksProxyAgent(process.env.PROXY_URL);
+            } else {
+                return new HttpsProxyAgent(process.env.PROXY_URL);
+            }
+        } catch (e) {
+            console.log('Proxy env error:', e.message);
+        }
+    }
+    
+    // Fallback ke random proxy dari list
+    try {
+        const proxyUrl = PROXY_LIST[currentProxyIndex % PROXY_LIST.length];
+        currentProxyIndex++;
+        
+        if (proxyUrl.startsWith('socks')) {
+            return new SocksProxyAgent(proxyUrl);
+        } else {
+            return new HttpsProxyAgent(proxyUrl);
+        }
+    } catch (e) {
+        return undefined;
+    }
+}
+
+// Route utama
 app.get('/', (req, res) => {
     const html = `
     <!DOCTYPE html>
@@ -44,7 +88,7 @@ app.get('/', (req, res) => {
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; }
             body { 
-                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
                 background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
                 min-height: 100vh;
                 padding: 20px;
@@ -61,46 +105,21 @@ app.get('/', (req, res) => {
                 color: #128C7E;
                 font-size: 28px;
                 margin-bottom: 10px;
-                display: flex;
-                align-items: center;
-                gap: 10px;
-            }
-            h1 span { font-size: 32px; }
-            .subtitle {
-                color: #666;
-                margin-bottom: 30px;
-                padding-bottom: 20px;
-                border-bottom: 2px solid #f0f0f0;
             }
             .info-card {
                 background: #f8f9fa;
                 border-radius: 15px;
                 padding: 20px;
-                margin-bottom: 25px;
+                margin: 20px 0;
             }
-            .info-row {
-                display: flex;
-                justify-content: space-between;
-                padding: 10px 0;
-                border-bottom: 1px solid #e0e0e0;
-            }
-            .info-row:last-child { border-bottom: none; }
-            .label { color: #666; font-weight: 500; }
-            .value { font-weight: 600; color: #333; }
             .status-badge {
                 padding: 5px 15px;
                 border-radius: 50px;
                 font-size: 14px;
                 font-weight: 600;
             }
-            .status-connected {
-                background: #d4edda;
-                color: #155724;
-            }
-            .status-disconnected {
-                background: #f8d7da;
-                color: #721c24;
-            }
+            .status-connected { background: #d4edda; color: #155724; }
+            .status-disconnected { background: #f8d7da; color: #721c24; }
             .btn {
                 background: #128C7E;
                 color: white;
@@ -111,19 +130,9 @@ app.get('/', (req, res) => {
                 font-weight: 600;
                 cursor: pointer;
                 width: 100%;
-                transition: all 0.3s;
                 margin: 10px 0;
             }
-            .btn:hover {
-                background: #075e54;
-                transform: translateY(-2px);
-                box-shadow: 0 5px 15px rgba(18,140,126,0.3);
-            }
-            .btn:disabled {
-                background: #ccc;
-                cursor: not-allowed;
-                transform: none;
-            }
+            .btn:hover { background: #075e54; }
             .code-box {
                 background: #f0f0f0;
                 padding: 20px;
@@ -133,7 +142,6 @@ app.get('/', (req, res) => {
                 font-size: 32px;
                 letter-spacing: 8px;
                 margin: 20px 0;
-                border: 2px dashed #128C7E;
             }
             .group-item {
                 background: #f8f9fa;
@@ -141,14 +149,7 @@ app.get('/', (req, res) => {
                 padding: 15px;
                 margin: 10px 0;
                 border-radius: 5px;
-                font-family: monospace;
                 word-break: break-all;
-            }
-            .group-item small {
-                display: block;
-                color: #666;
-                font-size: 12px;
-                margin-top: 5px;
             }
             .copy-btn {
                 background: #128C7E;
@@ -158,12 +159,6 @@ app.get('/', (req, res) => {
                 border-radius: 5px;
                 cursor: pointer;
                 margin-top: 5px;
-                font-size: 12px;
-            }
-            .footer {
-                text-align: center;
-                margin-top: 30px;
-                color: #999;
                 font-size: 12px;
             }
             .loading {
@@ -176,58 +171,51 @@ app.get('/', (req, res) => {
                 animation: spin 1s linear infinite;
             }
             @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+            .proxy-info {
+                font-size: 12px;
+                color: #666;
+                margin-top: 10px;
+                text-align: center;
+            }
         </style>
     </head>
     <body>
         <div class="container">
-            <h1>
-                <span>🤖</span> 
-                WA Bot Get Group ID
-            </h1>
-            <div class="subtitle">Ambil ID grup WhatsApp dengan mudah</div>
+            <h1>🤖 WA Bot Get Group ID</h1>
             
             <div class="info-card">
-                <div class="info-row">
-                    <span class="label">Nomor Bot</span>
-                    <span class="value">${NOMOR_BOT}</span>
+                <div style="display:flex; justify-content:space-between; margin-bottom:10px;">
+                    <span>Nomor Bot:</span>
+                    <strong>${NOMOR_BOT}</strong>
                 </div>
-                <div class="info-row">
-                    <span class="label">Status</span>
-                    <span class="value">
-                        <span id="statusBadge" class="status-badge ${isConnected ? 'status-connected' : 'status-disconnected'}">
-                            ${isConnected ? '✅ Terhubung' : '❌ Terputus'}
-                        </span>
-                    </span>
+                <div style="display:flex; justify-content:space-between;">
+                    <span>Status:</span>
+                    <span id="statusBadge" class="status-badge status-disconnected">❌ Terputus</span>
                 </div>
             </div>
 
-            <div id="pairingSection" style="${isConnected ? 'display:none' : 'display:block'}">
+            <div id="pairingSection">
                 <button class="btn" onclick="getPairingCode()" id="pairingBtn">
                     🔐 Dapatkan Kode Pairing
                 </button>
-                <div id="loading" style="display:none; text-align:center; margin:10px 0;">
+                <div id="loading" style="display:none; text-align:center;">
                     <div class="loading"></div> Memproses...
                 </div>
                 <div id="codeDisplay" style="display:none;">
                     <div class="code-box" id="pairingCode"></div>
-                    <p style="color: #666; font-size: 14px; text-align:center;">
-                        📱 Buka WhatsApp > 3 titik > Perangkat tertaut ><br>
-                        Gabung menggunakan nomor telepon<br>
-                        Masukkan kode di atas
+                    <p style="text-align:center;">
+                        1. Buka WhatsApp di HP<br>
+                        2. Tap 3 titik > Perangkat tertaut<br>
+                        3. Gabung menggunakan nomor telepon<br>
+                        4. Masukkan kode di atas
                     </p>
                 </div>
+                <div class="proxy-info" id="proxyInfo"></div>
             </div>
 
-            <div id="groupSection" style="${isConnected ? 'display:block' : 'display:none'}">
-                <h3 style="margin-bottom:15px;">📱 Grup Terdeteksi</h3>
+            <div id="groupSection" style="display:none;">
+                <h3>📱 Grup Terdeteksi</h3>
                 <div id="groupList"></div>
-                <p style="color: #666; font-size: 14px; margin-top:15px;">
-                    ✨ Kirim pesan di grup target, ID akan muncul otomatis
-                </p>
-            </div>
-
-            <div class="footer">
-                <p>© 2026 WA Bot Get Group ID</p>
             </div>
         </div>
 
@@ -246,8 +234,12 @@ app.get('/', (req, res) => {
                     } else if (data.error) {
                         alert('Error: ' + data.error);
                     }
+                    
+                    if (data.proxy) {
+                        document.getElementById('proxyInfo').innerText = '🔄 Proxy: ' + data.proxy;
+                    }
                 } catch (err) {
-                    alert('Gagal mendapatkan kode: ' + err.message);
+                    alert('Error: ' + err.message);
                 } finally {
                     document.getElementById('pairingBtn').disabled = false;
                     document.getElementById('loading').style.display = 'none';
@@ -259,7 +251,6 @@ app.get('/', (req, res) => {
                     const res = await fetch('/api/status');
                     const data = await res.json();
                     
-                    // Update status badge
                     const badge = document.getElementById('statusBadge');
                     if (data.connected) {
                         badge.className = 'status-badge status-connected';
@@ -273,36 +264,32 @@ app.get('/', (req, res) => {
                         document.getElementById('groupSection').style.display = 'none';
                     }
                     
-                    // Update group list
                     if (data.groups && data.groups.length > 0) {
                         let html = '';
                         data.groups.forEach(g => {
                             html += \`
                                 <div class="group-item">
                                     \${g}
-                                    <small>Ditemukan: \${new Date().toLocaleString()}</small>
                                     <button class="copy-btn" onclick="copyToClipboard('\${g}')">📋 Copy</button>
                                 </div>
                             \`;
                         });
                         document.getElementById('groupList').innerHTML = html;
-                    } else {
-                        document.getElementById('groupList').innerHTML = '<p style="color:#999; text-align:center;">Belum ada grup terdeteksi</p>';
                     }
-                } catch (err) {
-                    console.error('Status check failed:', err);
-                }
+                    
+                    if (data.proxy) {
+                        document.getElementById('proxyInfo').innerText = '🔄 Proxy: ' + data.proxy;
+                    }
+                } catch (err) {}
             }
 
             function copyToClipboard(text) {
-                navigator.clipboard.writeText(text).then(() => {
-                    alert('ID grup disalin!');
-                });
+                navigator.clipboard.writeText(text);
+                alert('ID grup disalin!');
             }
 
-            // Auto refresh status setiap 3 detik
             setInterval(checkStatus, 3000);
-            checkStatus(); // Panggil pertama kali
+            checkStatus();
         </script>
     </body>
     </html>
@@ -310,29 +297,24 @@ app.get('/', (req, res) => {
     res.send(html);
 });
 
-// API untuk mendapatkan pairing code
+// API endpoints
 app.get('/api/pairing', async (req, res) => {
     if (pairingCode) {
-        res.json({ code: pairingCode });
+        res.json({ 
+            code: pairingCode,
+            proxy: process.env.PROXY_URL || 'menggunakan proxy publik'
+        });
     } else {
-        res.json({ error: 'Kode belum tersedia, coba lagi dalam beberapa detik' });
+        res.json({ error: 'Kode belum siap', proxy: process.env.PROXY_URL });
     }
 });
 
-// API untuk cek status
 app.get('/api/status', (req, res) => {
     res.json({ 
         connected: isConnected,
-        groups: groupsDetected 
+        groups: groupsDetected,
+        proxy: process.env.PROXY_URL || 'proxy publik'
     });
-});
-
-// API untuk restart bot
-app.post('/api/restart', (req, res) => {
-    res.json({ message: 'Restarting bot...' });
-    setTimeout(() => {
-        process.exit(0);
-    }, 1000);
 });
 
 // Mulai server
@@ -342,17 +324,25 @@ app.listen(PORT, () => {
     startBot();
 });
 
-// ================== BOT WHATSAPP ==================
+// ================== BOT WHATSAPP DENGAN PROXY ==================
 async function startBot() {
     console.log('🤖 Memulai bot WhatsApp...');
     
     try {
-        // Reset state
         pairingCode = null;
         
         const { state, saveCreds } = await useMultiFileAuthState('./auth');
         
-        const sock = makeWASocket({
+        // Buat agent proxy
+        const agent = getProxyAgent();
+        if (agent) {
+            console.log('🔌 Menggunakan proxy:', process.env.PROXY_URL || PROXY_LIST[currentProxyIndex-1]);
+        } else {
+            console.log('⚠️ Tidak menggunakan proxy (koneksi langsung)');
+        }
+        
+        // Opsi koneksi
+        const socketConfig = {
             auth: state,
             browser: ['Get Group ID', 'Chrome', '1.0.0'],
             syncFullHistory: false,
@@ -361,26 +351,42 @@ async function startBot() {
             keepAliveIntervalMs: 30000,
             generateHighQualityLinkPreview: false,
             shouldIgnoreJid: () => false
-        });
-
-        // Simpan socket untuk digunakan nanti
+        };
+        
+        // Tambah proxy jika ada
+        if (agent) {
+            socketConfig.agent = agent;
+        }
+        
+        const sock = makeWASocket(socketConfig);
         botSocket = sock;
 
         sock.ev.on('creds.update', saveCreds);
 
-        // Proses pairing jika belum login
+        // Minta kode pairing
         if (!state.creds?.registered) {
             console.log('📱 Meminta kode pairing...');
             
-            try {
-                // Tunggu sebentar sebelum minta kode
-                await new Promise(resolve => setTimeout(resolve, 2000));
-                
-                const code = await sock.requestPairingCode(NOMOR_BOT);
-                pairingCode = code;
-                console.log('✅ Kode pairing:', code);
-            } catch (err) {
-                console.log('❌ Gagal minta kode:', err.message);
+            // Coba beberapa kali dengan proxy berbeda
+            for (let i = 0; i < 3; i++) {
+                try {
+                    await new Promise(resolve => setTimeout(resolve, 2000));
+                    const code = await sock.requestPairingCode(NOMOR_BOT);
+                    pairingCode = code;
+                    console.log('✅ Kode pairing:', code);
+                    break;
+                } catch (err) {
+                    console.log(`❌ Percobaan ${i+1} gagal:`, err.message);
+                    if (i < 2) {
+                        console.log('🔄 Ganti proxy...');
+                        // Ganti proxy untuk percobaan berikutnya
+                        const newAgent = getProxyAgent();
+                        if (newAgent) {
+                            sock.agent = newAgent;
+                        }
+                        await new Promise(resolve => setTimeout(resolve, 3000));
+                    }
+                }
             }
         }
 
@@ -389,9 +395,8 @@ async function startBot() {
             
             if (connection === 'open') {
                 isConnected = true;
-                pairingCode = null; // Hapus kode pairing setelah berhasil
+                pairingCode = null;
                 console.log('✅✅ BOT TERHUBUNG! ✅✅');
-                console.log('📱 Nomor bot:', NOMOR_BOT);
             }
             
             if (connection === 'close') {
@@ -402,7 +407,7 @@ async function startBot() {
                     console.log('🔄 Reconnect dalam 5 detik...');
                     setTimeout(startBot, 5000);
                 } else {
-                    console.log('🚪 Logout. Menghapus session...');
+                    console.log('🚪 Logout. Hapus session...');
                     try {
                         fs.rmSync('./auth', { recursive: true, force: true });
                         fs.mkdirSync('./auth');
@@ -421,48 +426,26 @@ async function startBot() {
             if (remoteJid && remoteJid.endsWith('@g.us')) {
                 console.log('🎯 ID GRUP:', remoteJid);
                 
-                // Simpan ke memory
                 if (!groupsDetected.includes(remoteJid)) {
                     groupsDetected.unshift(remoteJid);
-                    if (groupsDetected.length > 10) groupsDetected.pop(); // max 10
                 }
                 
-                // Simpan ke file
-                try {
-                    fs.appendFileSync('./groups.txt', remoteJid + '\n');
-                } catch (e) {}
+                fs.appendFileSync('./groups.txt', remoteJid + '\n');
                 
-                // Kirim ke admin
                 try {
                     await sock.sendMessage(ADMIN_NOMOR, {
-                        text: `🔹 *ID GRUP DITEMUKAN*\n\n${remoteJid}\n\nWaktu: ${new Date().toLocaleString('id-ID')}`
+                        text: `🔹 *ID GRUP DITEMUKAN*\n\n${remoteJid}`
                     });
-                    console.log('✅ ID grup dikirim ke admin');
-                } catch (e) {
-                    console.log('❌ Gagal kirim ke admin:', e.message);
-                }
+                } catch (e) {}
             }
-        });
-
-        // Handle error
-        sock.ev.on('error', (err) => {
-            console.log('❌ Socket error:', err.message);
         });
 
     } catch (err) {
         console.log('❌ Fatal error:', err.message);
-        console.log('🔄 Restart dalam 10 detik...');
         setTimeout(startBot, 10000);
     }
 }
 
 // Graceful shutdown
-process.on('SIGTERM', () => {
-    console.log('SIGTERM received, shutting down...');
-    process.exit(0);
-});
-
-process.on('SIGINT', () => {
-    console.log('SIGINT received, shutting down...');
-    process.exit(0);
-});
+process.on('SIGTERM', () => process.exit(0));
+process.on('SIGINT', () => process.exit(0));
